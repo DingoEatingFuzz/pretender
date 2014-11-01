@@ -50,8 +50,8 @@ function interceptor(pretender) {
 }
 
 function verbify(verb){
-  return function(path, handler){
-    this.register(verb, path, handler);
+  return function(path, handler, async){
+    this.register(verb, path, handler, async);
   };
 }
 
@@ -62,8 +62,9 @@ Pretender.prototype = {
   'delete': verbify('DELETE'),
   patch: verbify('PATCH'),
   head: verbify('HEAD'),
-  register: function register(verb, path, handler){
+  register: function register(verb, path, handler, async){
     handler.numberOfCalls = 0;
+    handler.async = async;
     this.handlers.push(handler);
 
     var registry = this.registry[verb];
@@ -76,15 +77,26 @@ Pretender.prototype = {
 
     if (handler) {
       handler.handler.numberOfCalls++;
+      var async = handler.handler.async;
+
       this.handledRequests.push(request);
 
       try {
         var statusHeadersAndBody = handler.handler(request),
             status = statusHeadersAndBody[0],
             headers = this.prepareHeaders(statusHeadersAndBody[1]),
-            body = this.prepareBody(statusHeadersAndBody[2]);
-        request.respond(status, headers, body);
-        this.handledRequest(verb, path, request);
+            body = this.prepareBody(statusHeadersAndBody[2]),
+            pretender = this;
+
+        if (async) {
+          this.handleResponse(request, async, function() {
+            request.respond(status, headers, body);
+            pretender.handledRequest(verb, path, request);
+          });
+        } else {
+          request.respond(status, headers, body);
+          this.handledRequest(verb, path, request);
+        }
       } catch (error) {
         this.erroredRequest(verb, path, request, error);
       }
@@ -92,6 +104,40 @@ Pretender.prototype = {
       this.unhandledRequests.push(request);
       this.unhandledRequest(verb, path, request);
     }
+  },
+  _responsePromises: [],
+  handleResponse: function(request, async, fn) {
+    var pretender = this;
+    var tracker = {
+      request: request,
+      fn: fn
+    };
+
+    pretender._responsePromises.push(tracker);
+
+    if (!async) {
+      pretender.resolve(request);
+    }
+
+    if (typeof async === 'number') {
+      setTimeout(function() {
+        pretender.resolve(request);
+      }, async);
+    }
+  },
+  resolve: function(request) {
+    for(var i = 0, len = this._responsePromises.length; i < len; i++) {
+      var res = this._responsePromises[i];
+      if (res.request === request || res.request.url === request) {
+        res.fn();
+        this._responsePromises.splice(i, 1);
+      }
+    }
+  },
+  shouldBlockFor: function(verb, path) {
+    var handler = this._handlerFor(verb, path, {});
+    if (!handler) { return true; }
+    return !handler.handler.async;
   },
   prepareBody: function(body) { return body; },
   prepareHeaders: function(headers) { return headers; },
